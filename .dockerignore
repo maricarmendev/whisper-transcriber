@@ -1,0 +1,34 @@
+# Build artefacts y deps locales — se reinstalan dentro de la imagen
+node_modules
+.next
+out
+
+# Archivos temporales de la app
+tmp
+
+# Git e IDE
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Env y secretos (nunca deben entrar a la imagen)
+.env
+.env.*
+
+# Docs / config local que no aporta al runtime
+README.md
+AGENTS.md
+CLAUDE.md
+Dockerfile
+.dockerignore
+
+# Logs y misc
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
