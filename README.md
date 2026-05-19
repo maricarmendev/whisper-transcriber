@@ -4,6 +4,8 @@ Aplicación web local para transcribir audios (notas de WhatsApp, grabaciones, e
 
 Todo el procesamiento ocurre dentro del contenedor: no se envía audio a servicios externos.
 
+![Demo de Whisper Transcriber](docs/demo.gif)
+
 ## Características
 
 - Interfaz web (Next.js 16 + React 19) para subir múltiples archivos y descargar los `.txt` resultantes.
