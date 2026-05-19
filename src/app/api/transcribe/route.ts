@@ -2,24 +2,16 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { nodewhisper } from "nodejs-whisper";
+import { MAX_BYTES, MAX_BYTES_LABEL, isModel } from "@/lib/whisper";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
-
-const MAX_BYTES = 100 * 1024 * 1024;
-
-const ALLOWED_MODELS = ["tiny", "base", "small"] as const;
-type Model = (typeof ALLOWED_MODELS)[number];
-
-function isModel(value: unknown): value is Model {
-  return typeof value === "string" && (ALLOWED_MODELS as readonly string[]).includes(value);
-}
 
 async function safeUnlink(p: string) {
   try {
     await fs.unlink(p);
   } catch {
-    // ignore — file may not exist
+    // file may not exist
   }
 }
 
@@ -38,7 +30,10 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "Missing 'file'" }, { status: 400 });
   }
   if (file.size > MAX_BYTES) {
-    return Response.json({ error: "File too large (max 100 MB)" }, { status: 413 });
+    return Response.json(
+      { error: `File too large (max ${MAX_BYTES_LABEL})` },
+      { status: 413 },
+    );
   }
   if (!isModel(model)) {
     return Response.json({ error: "Invalid 'model'" }, { status: 400 });
@@ -94,7 +89,10 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ transcription: transcription.trim() });
   } catch (err) {
     console.error("[transcribe] failed:", err);
-    return Response.json({ error: "Internal transcription error" }, { status: 500 });
+    return Response.json(
+      { error: "Internal transcription error" },
+      { status: 500 },
+    );
   } finally {
     await Promise.all([
       safeUnlink(audioPath),
