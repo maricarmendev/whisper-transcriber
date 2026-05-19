@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Model = "tiny" | "base" | "small";
 
@@ -15,17 +15,39 @@ type FileItem = {
 };
 
 const MODEL_OPTIONS: { value: Model; label: string; hint: string }[] = [
-  { value: "tiny", label: "tiny", hint: "Más rápido, menos preciso" },
-  { value: "base", label: "base", hint: "Balance recomendado" },
-  { value: "small", label: "small", hint: "Más preciso, más lento" },
+  { value: "tiny", label: "tiny", hint: "más rápido, menos preciso" },
+  { value: "base", label: "base", hint: "balance recomendado" },
+  { value: "small", label: "small", hint: "más preciso, más lento" },
 ];
 
-const STATUS_BADGE: Record<FileStatus, { emoji: string; label: string; cls: string }> = {
-  pending: { emoji: "⏳", label: "Pendiente", cls: "text-zinc-500" },
-  processing: { emoji: "⚙️", label: "Procesando", cls: "text-blue-600 dark:text-blue-400" },
-  done: { emoji: "✅", label: "Listo", cls: "text-green-600 dark:text-green-400" },
-  error: { emoji: "❌", label: "Error", cls: "text-red-600 dark:text-red-400" },
+const STATUS_META: Record<
+  FileStatus,
+  { label: string; dot: string; text: string }
+> = {
+  pending: {
+    label: "Pendiente",
+    dot: "bg-zinc-300 dark:bg-zinc-700",
+    text: "text-zinc-500 dark:text-zinc-400",
+  },
+  processing: {
+    label: "Procesando",
+    dot: "bg-blue-500",
+    text: "text-blue-600 dark:text-blue-400",
+  },
+  done: {
+    label: "Listo",
+    dot: "bg-emerald-500",
+    text: "text-emerald-600 dark:text-emerald-400",
+  },
+  error: {
+    label: "Error",
+    dot: "bg-rose-500",
+    text: "text-rose-600 dark:text-rose-400",
+  },
 };
+
+const ACCEPTED_EXTENSIONS = [".ogg", ".mp3", ".m4a", ".wav", ".webm"] as const;
+const ACCEPT_ATTR = `${ACCEPTED_EXTENSIONS.join(",")},audio/*`;
 
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`;
@@ -54,10 +76,12 @@ export default function Home() {
   const [model, setModel] = useState<Model>("base");
   const [items, setItems] = useState<FileItem[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  function handleFiles(fileList: FileList | null) {
+  const handleFiles = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     const next: FileItem[] = Array.from(fileList).map((file) => ({
       id: crypto.randomUUID(),
@@ -65,17 +89,18 @@ export default function Home() {
       status: "pending",
     }));
     setItems((prev) => [...prev, ...next]);
-  }
+  }, []);
 
   function patchItem(id: string, patch: Partial<FileItem>) {
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+    setItems((prev) =>
+      prev.map((it) => (it.id === id ? { ...it, ...patch } : it)),
+    );
   }
 
   async function transcribeAll() {
     if (isProcessing) return;
     setIsProcessing(true);
 
-    // Snapshot the pending items so new uploads mid-run don't get picked up.
     const pending = items.filter((it) => it.status === "pending");
 
     for (const item of pending) {
@@ -91,7 +116,10 @@ export default function Home() {
           body: form,
           signal: controller.signal,
         });
-        const data = (await res.json()) as { transcription?: string; error?: string };
+        const data = (await res.json()) as {
+          transcription?: string;
+          error?: string;
+        };
         if (!res.ok) {
           throw new Error(data.error ?? `HTTP ${res.status}`);
         }
@@ -104,7 +132,8 @@ export default function Home() {
           patchItem(item.id, { status: "pending", error: undefined });
           break;
         }
-        const message = err instanceof Error ? err.message : "Error desconocido";
+        const message =
+          err instanceof Error ? err.message : "Error desconocido";
         patchItem(item.id, { status: "error", error: message });
       } finally {
         abortRef.current = null;
@@ -141,172 +170,348 @@ export default function Home() {
     downloadText("transcripciones.txt", combined);
   }
 
-  const hasPending = items.some((it) => it.status === "pending");
-  const hasDone = items.some((it) => it.status === "done");
+  async function copyOne(item: FileItem) {
+    if (!item.transcription) return;
+    try {
+      await navigator.clipboard.writeText(item.transcription);
+      setCopiedId(item.id);
+    } catch {
+      // clipboard may be unavailable; silently ignore
+    }
+  }
+
+  useEffect(() => {
+    if (!copiedId) return;
+    const t = setTimeout(() => setCopiedId(null), 1500);
+    return () => clearTimeout(t);
+  }, [copiedId]);
+
+  const pendingCount = items.filter((it) => it.status === "pending").length;
+  const doneCount = items.filter((it) => it.status === "done").length;
+  const processingCount = items.filter(
+    (it) => it.status === "processing",
+  ).length;
+  const errorCount = items.filter((it) => it.status === "error").length;
+  const hasPending = pendingCount > 0;
+  const hasDone = doneCount > 0;
+
+  function onDropZoneClick() {
+    if (isProcessing) return;
+    fileInputRef.current?.click();
+  }
+
+  function onDragOver(e: React.DragEvent) {
+    if (isProcessing) return;
+    e.preventDefault();
+    setIsDragging(true);
+  }
+
+  function onDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    if (isProcessing) return;
+    handleFiles(e.dataTransfer.files);
+  }
 
   return (
-    <div className="min-h-full bg-zinc-50 dark:bg-black">
-      <main className="mx-auto max-w-3xl px-6 py-10">
-        <header className="mb-8">
-          <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            Whisper Transcriber
-          </h1>
-          <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
-            Subí varios audios (WhatsApp .ogg, .mp3, .m4a, .wav, .webm) y obtené su transcripción en
-            español. El procesamiento ocurre en serie.
+    <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
+      <main className="mx-auto max-w-2xl px-6 py-16">
+        <header className="mb-12">
+          <div className="flex items-center gap-2">
+            <div className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-200 dark:border-zinc-800">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-4 w-4"
+                aria-hidden
+              >
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                <path d="M19 11a7 7 0 0 1-14 0" />
+                <path d="M12 18v4" />
+              </svg>
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Whisper Transcriber
+            </h1>
+          </div>
+
+          <p className="mt-2 max-w-md text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            Sube audios (WhatsApp .ogg, .mp3, .m4a, .wav, .webm) y obtén su
+            transcripción en español. El procesamiento ocurre en serie.
           </p>
         </header>
 
-        <section className="mb-6">
-          <h2 className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">Modelo</h2>
-          <div className="flex flex-col gap-2 sm:flex-row">
+        <section className="mb-8">
+          <div className="mb-3 flex items-baseline justify-between">
+            <h2 className="text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-500">
+              Modelo
+            </h2>
+            <span className="text-xs text-zinc-500 dark:text-zinc-500">
+              {MODEL_OPTIONS.find((m) => m.value === model)?.hint}
+            </span>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label="Modelo de Whisper"
+            className="inline-flex w-full rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900"
+          >
             {MODEL_OPTIONS.map((opt) => {
               const selected = model === opt.value;
               return (
-                <label
+                <button
                   key={opt.value}
-                  className={`flex-1 cursor-pointer rounded-lg border px-4 py-3 transition-colors ${
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => setModel(opt.value)}
+                  disabled={isProcessing}
+                  className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                     selected
-                      ? "border-zinc-900 bg-zinc-900 text-zinc-50 dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-                      : "border-zinc-200 bg-white hover:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-zinc-600"
+                      ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-950 dark:text-zinc-50"
+                      : "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
                   }`}
                 >
-                  <input
-                    type="radio"
-                    name="model"
-                    value={opt.value}
-                    checked={selected}
-                    onChange={() => setModel(opt.value)}
-                    disabled={isProcessing}
-                    className="sr-only"
-                  />
-                  <div className="font-medium">{opt.label}</div>
-                  <div
-                    className={`text-xs ${
-                      selected
-                        ? "text-zinc-300 dark:text-zinc-600"
-                        : "text-zinc-500 dark:text-zinc-400"
-                    }`}
-                  >
-                    {opt.hint}
-                  </div>
-                </label>
+                  {opt.label}
+                </button>
               );
             })}
           </div>
         </section>
 
-        <section className="mb-6">
-          <h2 className="mb-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">Archivos</h2>
+        <section className="mb-8">
+          <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-zinc-500 dark:text-zinc-500">
+            Archivos
+          </h2>
+          <button
+            type="button"
+            onClick={onDropZoneClick}
+            onDragOver={onDragOver}
+            onDragEnter={onDragOver}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+            disabled={isProcessing}
+            className={`flex w-full flex-col items-center justify-center rounded-lg border border-dashed px-6 py-10 text-center transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              isDragging
+                ? "border-zinc-900 bg-zinc-50 dark:border-zinc-100 dark:bg-zinc-900"
+                : "border-zinc-300 bg-white hover:border-zinc-400 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-950 dark:hover:border-zinc-600 dark:hover:bg-zinc-900"
+            }`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="mb-3 h-6 w-6 text-zinc-400 dark:text-zinc-500"
+              aria-hidden
+            >
+              <path d="M12 16V4" />
+              <path d="m6 10 6-6 6 6" />
+              <path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2" />
+            </svg>
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              Arrastrá audios aquí o hacé clic para seleccionar
+            </p>
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-500">
+              .ogg · .mp3 · .m4a · .wav · .webm · hasta 100 MB
+            </p>
+          </button>
           <input
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".ogg,.mp3,.m4a,.wav,.webm,audio/*"
-            onChange={(e) => handleFiles(e.target.files)}
+            accept={ACCEPT_ATTR}
+            onChange={(e) => {
+              handleFiles(e.target.files);
+              e.target.value = "";
+            }}
             disabled={isProcessing}
-            className="block w-full text-sm text-zinc-700 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-900 file:px-4 file:py-2 file:text-sm file:font-medium file:text-zinc-50 hover:file:bg-zinc-700 disabled:opacity-50 dark:text-zinc-300 dark:file:bg-zinc-100 dark:file:text-zinc-900 dark:hover:file:bg-zinc-300"
+            className="sr-only"
           />
         </section>
 
-        <div className="mb-6 flex flex-wrap gap-2">
+        <div className="mb-8 flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={transcribeAll}
             disabled={isProcessing || !hasPending}
-            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-50 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
           >
-            {isProcessing ? "Procesando…" : "Transcribir todo"}
+            {isProcessing ? (
+              <>
+                <Spinner className="h-3.5 w-3.5" />
+                Procesando…
+              </>
+            ) : (
+              <>
+                Transcribir
+                {hasPending && (
+                  <span className="rounded bg-white/15 px-1.5 py-0.5 text-xs font-medium dark:bg-zinc-900/15">
+                    {pendingCount}
+                  </span>
+                )}
+              </>
+            )}
           </button>
+
           {isProcessing && (
             <button
               type="button"
               onClick={cancelProcessing}
-              className="rounded-md border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 dark:border-red-900 dark:bg-zinc-950 dark:text-red-400 dark:hover:bg-red-950"
+              className="text-sm font-medium text-rose-600 hover:text-rose-700 dark:text-rose-400 dark:hover:text-rose-300"
             >
               Cancelar
             </button>
           )}
-          <button
-            type="button"
-            onClick={downloadAllCombined}
-            disabled={!hasDone}
-            className="rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900"
-          >
-            Descargar todo combinado
-          </button>
-          <button
-            type="button"
-            onClick={clearAll}
-            disabled={isProcessing || items.length === 0}
-            className="rounded-md border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
-          >
-            Limpiar
-          </button>
+
+          <div className="ml-auto flex items-center gap-4">
+            <button
+              type="button"
+              onClick={downloadAllCombined}
+              disabled={!hasDone}
+              className="text-sm text-zinc-600 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:text-zinc-100"
+            >
+              Descargar todo
+            </button>
+            <button
+              type="button"
+              onClick={clearAll}
+              disabled={isProcessing || items.length === 0}
+              className="text-sm text-zinc-500 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-500 dark:hover:text-zinc-100"
+            >
+              Limpiar
+            </button>
+          </div>
         </div>
 
-        <section className="flex flex-col gap-3">
+        {items.length > 0 && (
+          <div className="mb-3 flex items-center gap-3 text-xs text-zinc-500 dark:text-zinc-500">
+            <span>
+              {items.length} archivo{items.length === 1 ? "" : "s"}
+            </span>
+            <span aria-hidden>·</span>
+            <span>
+              {doneCount} listo{doneCount === 1 ? "" : "s"}
+            </span>
+            {processingCount > 0 && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-blue-600 dark:text-blue-400">
+                  {processingCount} procesando
+                </span>
+              </>
+            )}
+            {errorCount > 0 && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-rose-600 dark:text-rose-400">
+                  {errorCount} con error
+                </span>
+              </>
+            )}
+          </div>
+        )}
+
+        <section className="flex flex-col gap-2">
           {items.length === 0 ? (
-            <p className="text-sm text-zinc-500 dark:text-zinc-500">
-              Todavía no hay archivos. Seleccioná algunos arriba.
+            <p className="rounded-lg border border-dashed border-zinc-200 px-4 py-8 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-500">
+              Todavía no hay archivos.
             </p>
           ) : (
             items.map((item) => {
-              const badge = STATUS_BADGE[item.status];
+              const meta = STATUS_META[item.status];
               return (
                 <article
                   key={item.id}
-                  className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950"
+                  className="rounded-lg border border-zinc-200 bg-white transition-colors dark:border-zinc-800 dark:bg-zinc-950"
                 >
-                  <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 px-4 py-3">
+                    <span
+                      className="relative flex h-2 w-2 shrink-0"
+                      aria-hidden
+                    >
+                      <span
+                        className={`absolute inline-flex h-full w-full rounded-full ${meta.dot} ${
+                          item.status === "processing"
+                            ? "animate-ping opacity-75"
+                            : ""
+                        }`}
+                      />
+                      <span
+                        className={`relative inline-flex h-2 w-2 rounded-full ${meta.dot}`}
+                      />
+                    </span>
+
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-sm font-medium ${badge.cls}`}>
-                          <span aria-hidden>{badge.emoji}</span> {badge.label}
-                        </span>
-                      </div>
                       <div
-                        className="mt-1 truncate text-sm text-zinc-900 dark:text-zinc-100"
+                        className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100"
                         title={item.file.name}
                       >
                         {item.file.name}
                       </div>
-                      <div className="text-xs text-zinc-500 dark:text-zinc-500">
-                        {formatBytes(item.file.size)}
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-500">
+                        <span className={meta.text}>{meta.label}</span>
+                        <span aria-hidden>·</span>
+                        <span>{formatBytes(item.file.size)}</span>
                       </div>
                     </div>
-                    <div className="flex shrink-0 flex-col gap-2">
+
+                    <div className="flex shrink-0 items-center gap-1">
                       {item.status === "done" && (
-                        <button
-                          type="button"
-                          onClick={() => downloadOne(item)}
-                          className="rounded-md border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-900 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:hover:bg-zinc-900"
-                        >
-                          Descargar .txt
-                        </button>
+                        <>
+                          <IconButton
+                            label={
+                              copiedId === item.id ? "Copiado" : "Copiar texto"
+                            }
+                            onClick={() => copyOne(item)}
+                          >
+                            {copiedId === item.id ? (
+                              <CheckIcon />
+                            ) : (
+                              <CopyIcon />
+                            )}
+                          </IconButton>
+                          <IconButton
+                            label="Descargar .txt"
+                            onClick={() => downloadOne(item)}
+                          >
+                            <DownloadIcon />
+                          </IconButton>
+                        </>
                       )}
                       {!isProcessing && (
-                        <button
-                          type="button"
+                        <IconButton
+                          label="Quitar"
                           onClick={() => removeItem(item.id)}
-                          className="rounded-md border border-transparent px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-900"
                         >
-                          Quitar
-                        </button>
+                          <XIcon />
+                        </IconButton>
                       )}
                     </div>
                   </div>
 
                   {item.status === "done" && item.transcription && (
-                    <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-zinc-50 p-3 text-sm text-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
-                      {item.transcription}
-                    </pre>
+                    <div className="border-t border-zinc-100 px-4 py-3 dark:border-zinc-900">
+                      <pre className="max-h-80 overflow-auto whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-800 dark:text-zinc-200">
+                        {item.transcription}
+                      </pre>
+                    </div>
                   )}
 
                   {item.status === "error" && item.error && (
-                    <p className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
+                    <div className="border-t border-rose-100 bg-rose-50/50 px-4 py-2.5 text-xs text-rose-700 dark:border-rose-950 dark:bg-rose-950/30 dark:text-rose-300">
                       {item.error}
-                    </p>
+                    </div>
                   )}
                 </article>
               );
@@ -315,5 +520,126 @@ export default function Home() {
         </section>
       </main>
     </div>
+  );
+}
+
+function Spinner({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={`animate-spin ${className}`}
+      aria-hidden
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        opacity="0.25"
+      />
+      <path
+        d="M21 12a9 9 0 0 0-9-9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function IconButton({
+  children,
+  label,
+  onClick,
+}: {
+  children: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+    >
+      {children}
+    </button>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden
+    >
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4 text-emerald-600 dark:text-emerald-400"
+      aria-hidden
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden
+    >
+      <path d="M12 4v12" />
+      <path d="m6 14 6 6 6-6" />
+      <path d="M4 20h16" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden
+    >
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
+    </svg>
   );
 }
